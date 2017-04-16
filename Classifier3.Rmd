@@ -1,0 +1,196 @@
+---
+title: "TXT classifier"
+author: "Ambra"
+date: "15 aprile 2017"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Ham and Spam
+It can be useful to be able to classify new "test" documents using already classified "training" documents.  A common example is using a corpus of labeled spam and ham (non-spam) e-mails to predict whether or not a new document is spam.  
+
+For this project, you can start with a spam/ham dataset, then predict the class of new documents (either withheld from the training dataset or from another source such as your own spam folder).
+
+
+
+```{r Classifier}
+library(tm)
+library(dplyr)
+library(tidytext)
+library(stringr)
+library(RTextTools)
+
+```
+#Loading the data into R using TM Package
+
+##Spam and Ham emails
+
+```{r}
+spam.dir <- file.path("C:/Users/Patrizia/Desktop/Ambra MSDA/W9/spam")
+ham.dir<- file.path("C:/Users/Patrizia/Desktop/Ambra MSDA/W9/easy_ham_2")
+```
+
+##Creating 2 corpora and filtering out the cmds documents
+```{r}
+spamcorpus <- VCorpus(DirSource(spam.dir))
+hamcorpus <- VCorpus(DirSource(ham.dir))
+meta(spamcorpus[[501]])
+idx <- meta(spamcorpus, "id") == 'cmds'
+idxh<-meta(hamcorpus, "id") == 'cmds'
+spamcorpus<-spamcorpus[-idx]
+hamcorpus<-hamcorpus[-idxh]
+
+```
+
+#Wordcloud- top spam words
+
+```{r warning=FALSE}
+library(wordcloud)
+##Clean up the spamcorpus and remove custom list of words that are found in the first and last rows of each email
+
+spamcorpus1<-tm_map(spamcorpus, content_transformer(function(x) str_replace_all(x, "If you wish to leave this list please use the link below", " ")))
+
+##Remove URLS, emails and extra text
+spamcorpus1<-tm_map(spamcorpus1, content_transformer(function(x) str_replace_all(x, "http.* *|\\S+@\\S+", " ")))
+
+spamcorpus1<- spamcorpus1 %>%  tm_map(content_transformer(tolower))
+
+spamcorpus1<-tm_map(spamcorpus1, content_transformer(function(x) str_replace_all(x, "from.*$|return-path.*$|delivered.*$|received.*$|reply.*$|to:.*$|date:.*$|x-mailer:.*$|content-transfer-encoding:.*$|x-mime-autoconverted.*$|content-type.*$|mIME-Version.*$|message-id:.*$|\t.*$|sender:.*$|precedence:.*$|list-Id:.*$|x-mailman-version:.*$|x-beenthere:.*$|list maintainer:.*$|subject|font|href|src|nbsp|esmpt|smtp|img|widthd|heightd|smtp", " ")))
+
+##Remove HTML tags
+spamcorpus1<-tm_map(spamcorpus1, content_transformer(function(x) str_replace_all(x, "<.*?>", " ")))
+
+spamcorpus1<- spamcorpus1 %>% 
+    tm_map(removeNumbers) %>%
+    tm_map(removeWords, stopwords(kind="en")) %>%
+    tm_map(removePunctuation) %>%
+    tm_map(stripWhitespace)
+
+spamcorpus1tdm<- as.matrix(TermDocumentMatrix(spamcorpus1))
+
+
+word.freq <- sort(rowSums(spamcorpus1tdm), decreasing = T)
+
+wordcloud(words = names(word.freq), freq = word.freq, min.freq = 30,max.freq=50,
+          random.order = F)
+
+
+```
+
+##Modifying the id tag and merge corpora
+```{r}
+for(i in seq(length(hamcorpus))){
+  meta(hamcorpus[[i]], tag = "type")<- "HAM"
+}
+
+for(i in seq(length(spamcorpus))){
+  meta(spamcorpus[[i]], tag = "type")<- "SPAM"
+}
+
+emails<-c(spamcorpus, hamcorpus, recursive=T)
+```
+
+##reshuffle docs, cleaning the corpus
+```{r}
+emails<-sample(emails)
+
+emails<- emails %>% tm_map(content_transformer(tolower)) %>% 
+  tm_map(content_transformer(removePunctuation)) %>% 
+  tm_map(content_transformer(stemDocument)) %>% 
+  tm_map(content_transformer(removeNumbers)) 
+
+emails<-tm_map(emails,removeWords, words = stopwords("en"))
+```
+
+##How many emails are spam or ham?
+```{r}
+spam_tags <- factor(unlist(meta(emails, "type")))
+table(spam_tags)
+```
+##Create TDMs, remove sparse terms, convert TDM to Dataframe
+```{r}
+emailstdm<-TermDocumentMatrix(emails)
+
+emailstdm<-removeSparseTerms(emailstdm, .99)
+
+email.df <- as.data.frame(data.matrix(emailstdm),stringsAsFactors=FALSE)
+
+## Remove words with total frequency less than 3
+email.df<- email.df[rowSums(email.df) > 3, ]
+```
+
+#SVM Classifier
+
+```{r}
+##Extract the spam tag
+
+spam<-c()
+for(i in 1:length(emails)){
+  spam<-c(spam,emails[[i]]$meta$type)
+}
+
+N<-nDocs(emailstdm)
+
+## set up model container using a 75/25 split between training and test data. Reference code as per chapter 10 of "Automated Data Collection with R"
+container <- create_container(
+    email.df,
+    labels = spam,
+    trainSize = 1:(0.75*N),
+    testSize = (0.75*N+1):N,
+    virgin = FALSE
+)
+
+ slotNames(container) 
+ 
+ emailsdf_train <- email.df[1:1425,]
+ 
+ emailsdf_test <- email.df[1426:1900,]
+
+##Use SVM model classifier to make predictions
+
+svm.model <- train_model(container, "SVM")
+
+svm.output <- classify_model(container, svm.model)
+
+head(svm.output)
+
+##Since we know the correct labels, we can investigate how often the algorithms have misclassified the emails.  
+
+labels_out <- data.frame( correct_label = spam[1426:N], svm = as.character(svm.output[,1]), stringsAsFactors = F)
+```
+## SVM performance 
+```{r}
+round(prop.table(table(labels_out[,1] == labels_out[,2])), digits = 3)
+
+##SVM classified 73% of the emails correctly either as HAM or SPAM
+
+##by Type 
+
+head(labels_out)
+
+library(tidyverse)
+
+labels_out_ham <- labels_out %>% filter(correct_label == "HAM")
+ ## SVM performance for ham
+table(labels_out_ham[,1] == labels_out_ham[,2])
+round(prop.table(table(labels_out_ham[,1] == labels_out_ham[,2])), digits = 3)
+
+labels_out_spam <- labels_out %>% filter(correct_label == "SPAM")
+ ## SVM performance for spam
+
+table(labels_out_spam[,1] == labels_out_spam[,2])
+round(prop.table(table(labels_out_spam[,1] == labels_out_spam[,2])), digits = 3)
+
+##Did the model classify all test spam data incorrectly? 
+```
+
+#Conclusions
+
+##We ingested 1400 HAM emails and 500 SPAM emails downloaded from <http://spamassassin.apache.org/old/publiccorpus/> into a SVM classifier, training the model with 75% of the data. The SVM accurately classified 72% of the emails.
+```
+
+
